@@ -1,0 +1,9 @@
+node_modules/
+.env
+dist/
+*.log
+.DS_Store
+
+# Material privado de preparación (no se publica)
+docs/instrucciones/
+CLAUDE.md

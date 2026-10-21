@@ -1,0 +1,23 @@
+[
+  {
+    "nit": "900123456-7",
+    "nombre": "Suministros Andinos SAS",
+    "estado": "ACTIVO",
+    "condicionPagoDefault": "P30",
+    "indicadorIvaDefault": "I19"
+  },
+  {
+    "nit": "800987654-3",
+    "nombre": "Tecnología del Caribe Ltda",
+    "estado": "BLOQUEADO",
+    "condicionPagoDefault": "P60",
+    "indicadorIvaDefault": "I19"
+  },
+  {
+    "nit": "901555222-1",
+    "nombre": "Papelería El Centro SAS",
+    "estado": "ACTIVO",
+    "condicionPagoDefault": "P00",
+    "indicadorIvaDefault": "I19"
+  }
+]

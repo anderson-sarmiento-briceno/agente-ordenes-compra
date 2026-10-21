@@ -1,0 +1,5 @@
+[
+  { "codigo": "I19", "descripcion": "IVA general 19%", "tasa": 0.19 },
+  { "codigo": "I05", "descripcion": "IVA reducido 5%", "tasa": 0.05 },
+  { "codigo": "I00", "descripcion": "Excluido de IVA", "tasa": 0 }
+]

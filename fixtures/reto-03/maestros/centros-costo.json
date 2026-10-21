@@ -1,0 +1,22 @@
+[
+  {
+    "codigo": "CC100",
+    "nombre": "Tecnología",
+    "subareas": ["INFRA", "DESARROLLO"],
+    "lider": {
+      "nombre": "Laura Gómez",
+      "email": "laura.gomez@empresa.com",
+      "topeAprobacion": 20000000
+    }
+  },
+  {
+    "codigo": "CC200",
+    "nombre": "Administrativa",
+    "subareas": ["COMPRAS", "TALENTO"],
+    "lider": {
+      "nombre": "Carlos Ruiz",
+      "email": "carlos.ruiz@empresa.com",
+      "topeAprobacion": 5000000
+    }
+  }
+]

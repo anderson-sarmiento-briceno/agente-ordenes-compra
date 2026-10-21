@@ -1,0 +1,12 @@
+{
+  "id": "sol-004",
+  "fecha": "2026-10-07",
+  "solicitante": "María López",
+  "nitProveedor": "800987654-3",
+  "centroCosto": "CC100",
+  "subarea": "INFRA",
+  "indicadorIva": "I19",
+  "items": [
+    { "descripcion": "Switch 24 puertos", "cantidad": 3, "precioUnitario": 1500000 }
+  ]
+}

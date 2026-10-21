@@ -1,0 +1,5 @@
+[
+  { "codigo": "P00", "dias": 0, "descripcion": "Pago de contado" },
+  { "codigo": "P30", "dias": 30, "descripcion": "Pago a 30 días" },
+  { "codigo": "P60", "dias": 60, "descripcion": "Pago a 60 días" }
+]

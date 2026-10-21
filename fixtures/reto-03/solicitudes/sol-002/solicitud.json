@@ -1,0 +1,12 @@
+{
+  "id": "sol-002",
+  "fecha": "2026-10-03",
+  "solicitante": "Ana Torres",
+  "nitProveedor": "901555222-1",
+  "centroCosto": "CC200",
+  "subarea": "TALENTO",
+  "indicadorIva": "I19",
+  "items": [
+    { "descripcion": "Silla ergonómica", "cantidad": 10, "precioUnitario": 600000 }
+  ]
+}

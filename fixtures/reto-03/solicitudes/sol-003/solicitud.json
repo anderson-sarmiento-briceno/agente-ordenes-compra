@@ -1,0 +1,13 @@
+{
+  "id": "sol-003",
+  "fecha": "2026-10-05",
+  "solicitante": "Jorge Díaz",
+  "nitProveedor": "900123456-7",
+  "centroCosto": "CC100",
+  "subarea": "INFRA",
+  "indicadorIva": "I19",
+  "condicionPago": "P30",
+  "items": [
+    { "descripcion": "Licencia antivirus anual", "cantidad": 50, "precioUnitario": 80000 }
+  ]
+}

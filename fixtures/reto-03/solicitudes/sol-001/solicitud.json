@@ -1,0 +1,12 @@
+{
+  "id": "sol-001",
+  "fecha": "2026-10-01",
+  "solicitante": "Pedro Martínez",
+  "nitProveedor": "900123456-7",
+  "centroCosto": "CC100",
+  "subarea": "DESARROLLO",
+  "indicadorIva": "I19",
+  "items": [
+    { "descripcion": "Portátil 16GB RAM", "cantidad": 2, "precioUnitario": 2000000 }
+  ]
+}
