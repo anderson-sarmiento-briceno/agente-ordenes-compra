@@ -1,5 +1,5 @@
 {
-  "name": "reto3-periferia",
+  "name": "agente-ordenes-compra",
   "version": "1.0.0",
   "description": "Agente conversacional que valida solicitudes de compra y crea órdenes de compra en un SAP simulado",
   "type": "module",
