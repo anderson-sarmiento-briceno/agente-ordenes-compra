@@ -130,12 +130,12 @@ Es la única regla que depende de **texto libre**. Hay que extraer el total de `
 
 ### 6.1 Opción de integración, dado que la viabilidad no está confirmada
 
-| Opción | Cuándo | Decisión |
-|---|---|---|
-| **OData `API_PURCHASEORDER_PROCESS_SRV`** (S/4HANA) | Si la empresa tiene S/4HANA con APIs publicadas | **Primera opción.** Es el estándar de SAP, usa HTTP/JSON y es fácil de gobernar. Las escrituras exigen un token CSRF (`x-csrf-token: fetch`). |
-| **RFC/BAPI `BAPI_PO_CREATE1`** | ECC o S/4 sin OData expuesto | Alternativa. Requiere un conector RFC (Cloud Connector o middleware) y `BAPI_TRANSACTION_COMMIT`; los errores llegan en la tabla `RETURN`. |
-| **SAP Integration Suite** | Si TI centraliza integraciones | El agente llama a un endpoint propio y un iFlow traduce a OData o BAPI. Más gobierno, una pieza más. |
-| **Carga por archivo** | Si no hay conexión viable | Plan B (§6.5). |
+| Opción | Cuándo | Cómo se implementaría | Decisión |
+|---|---|---|---|
+| **OData `API_PURCHASEORDER_PROCESS_SRV`** (S/4HANA) | Si la empresa tiene S/4HANA con APIs publicadas | Como cualquier **API REST con JSON**: el adaptador hace peticiones HTTP autenticadas con OAuth 2.0. Antes de escribir pide un token CSRF (`x-csrf-token: fetch`), que SAP exige como protección. | **Primera opción.** Es el estándar de SAP, usa tecnologías web comunes (HTTP, JSON, OAuth) y es fácil de probar, monitorear y gobernar. |
+| **RFC/BAPI `BAPI_PO_CREATE1`** | ECC o S/4 sin OData expuesto | Se llama una función interna de SAP mediante un conector RFC propio de SAP (Cloud Connector o middleware). Después se confirma con `BAPI_TRANSACTION_COMMIT`; los errores llegan en la tabla `RETURN`. | Alternativa. Requiere tecnología específica de SAP y más dependencia de TI. |
+| **SAP Integration Suite** | Si TI centraliza integraciones | Funciona como un **orquestador de flujos**: el agente llama a un endpoint propio y un flujo (iFlow) traduce y envía a OData o BAPI, con reintentos y monitoreo centralizados. | Buena opción si la empresa ya la usa. Da más gobierno, a cambio de una pieza más. |
+| **Carga por archivo** | Si no hay conexión viable | **Pipeline ETL en Python**: genera el archivo de carga con las OC ya validadas (§6.5). | Plan B. Funciona desde el día uno, sin depender de TI. |
 
 Como la viabilidad no está confirmada, **el agente no cambia**: solo se implementa otra clase que cumpla `SapAdapter` (`consultarProveedor`, `crearOrden`, `buscarOrdenPorReferencia`). Se puede empezar con el Plan B e ir a OData cuando exista conexión.
 
@@ -165,11 +165,13 @@ Como la viabilidad no está confirmada, **el agente no cambia**: solo se impleme
 - **Usuario técnico** con mínimo privilegio: crear y consultar OC en la sociedad 1000.
 - OData: **OAuth 2.0 client credentials** o certificado X.509, vía un *Destination* de BTP o un gestor de secretos (Azure Key Vault / AWS Secrets Manager).
 - Las credenciales viven **solo en el adaptador del backend**. Nunca en el agente, el prompt, el front ni los logs: el modelo jamás ve ni maneja credenciales, solo llama `oc_crear`.
+- **API intermedia entre el agente y SAP.** El agente nunca habla con SAP directamente: el adaptador es una API propia con permisos mínimos y auditoría de cada llamada (quién confirmó, qué payload se envió, qué respondió SAP).
+- **Conexión solo saliente por HTTPS** hacia la red de SAP (p. ej. SAP Cloud Connector), sin abrir puertos entrantes.
 
 ### 6.4 Idempotencia y errores parciales
 
 1. **Antes de crear:** `buscarOrdenPorReferencia(solicitud_id)`. Si existe, se devuelve esa OC.
-2. **Patrón outbox:** se registra la intención (`PENDIENTE`) con la clave antes de llamar a SAP.
+2. **Patrón outbox:** antes de llamar a SAP, se registra la intención (`PENDIENTE`) en una tabla de PostgreSQL con restricción `UNIQUE` sobre `solicitud_id`. La base de datos impide dos intenciones para la misma solicitud aunque lleguen en paralelo.
 3. **Timeout o respuesta ambigua:** no se reintenta a ciegas. Primero se consulta por referencia y solo se crea si no existe.
 4. **Reintentos** con backoff exponencial solo para errores transitorios (5xx, 429, red). Los errores de negocio (mensajes `E`/`A` en `RETURN`, 400 de OData) no se reintentan: se devuelven al agente como `{ ok: false, error }` con el texto de SAP.
 5. **Error parcial** (la OC se creó pero falló el adjunto de la evidencia): se registra `creada_sin_evidencia` y **solo se reintenta el adjunto**, nunca la OC. Si en BAPI la creación devuelve advertencias `W`, se hace commit y se informan.
@@ -180,6 +182,11 @@ El agente igual elimina la digitación y la validación manual:
 - Genera la **OC lista para pegar**: el payload validado más una vista por campo en el orden de la transacción ME21N.
 - Genera un **archivo de carga masiva** (CSV o plantilla para la herramienta de migración o carga que defina TI) con todas las OC aprobadas del día.
 - La analista carga el archivo y registra el número de OC devuelto; el log de control y la trazabilidad no cambian.
+- **Automatización con un pipeline ETL diario en Python** hacia PostgreSQL:
+  1. Extraer las OC aprobadas.
+  2. Validar la calidad: llaves, montos y códigos contra los maestros.
+  3. Generar el archivo de carga.
+  4. Leer los números de OC que devuelve SAP y cerrar cada registro.
 
 ---
 
@@ -194,10 +201,15 @@ El agente igual elimina la digitación y la validación manual:
 **Qué ya hace el agente:** detecta el caso (RC8), lo crea solo con confirmación explícita y lo marca `retroactiva = true` en `out/control.csv`. Así, por primera vez, **la dirección puede medir el porcentaje de OC retroactivas** por área, proveedor y aprobador.
 
 **Cambio de proceso propuesto:**
-1. **Medir 4 semanas** antes de decidir la política (tolerar con marca o rechazar es una pregunta abierta del PRD).
+1. **Línea base y meta.** Medir 4 semanas para fijar la línea base del porcentaje de OC retroactivas, decidir la política con datos (tolerar con marca o rechazar es una pregunta abierta del PRD) y luego fijar una meta de reducción con seguimiento periódico.
 2. **Flujo diferenciado:** una retroactiva exige justificación y la aprobación de un nivel superior (o de control interno) por encima de un monto.
 3. **Atacar la causa:** si el motivo es la urgencia, habilitar canales rápidos legítimos (contratos marco, catálogos, OC abiertas por proveedor recurrente), para que saltarse el proceso deje de ser la vía más cómoda.
-4. **Meta e indicador** en el comité: porcentaje de retroactivas por área, con reducción trimestral.
+4. **Tablero en Power BI** alimentado por `out/control.csv` (en producción, por la tabla de control en PostgreSQL). Mostraría:
+   - el porcentaje de retroactivas por área, proveedor y aprobador;
+   - los días entre factura y OC;
+   - la tendencia mensual frente a la meta.
+
+   Se revisa en el comité.
 
 ---
 
@@ -242,7 +254,7 @@ El agente igual elimina la digitación y la validación manual:
 | `oc_leer_excel` (P1) | ❌ No hecho | Opcional. |
 | Bonus `modulo/` | ✅ Hecho | `agent.md` y `skill/ordenes-compra/SKILL.md` se **generan** desde `agent/prompt.md` y `src/knowledge/` (`npm run modulo`); `tools/oc.ts` **reexporta** `src/tools/oc.ts`. Son las mismas piezas que usa la app, no copias. |
 
-**Para producción falta:** adaptador SAP real, persistencia transaccional (outbox y auditoría en base de datos), autenticación SSO, pruebas unitarias por regla, observabilidad y límites de uso por usuario.
+**Para producción falta:** adaptador SAP real, persistencia transaccional (outbox y auditoría en PostgreSQL), autenticación SSO, pruebas unitarias por regla, observabilidad y límites de uso por usuario.
 
 ---
 
@@ -269,7 +281,7 @@ El agente igual elimina la digitación y la validación manual:
 |---|---|
 | **Inyección de instrucciones** en cotizaciones o correos (texto no confiable que lee el modelo) | Las decisiones están en código, las herramientas releen las fuentes, `oc_crear` revalida y la confirmación la decide el backend, no el modelo. |
 | El modelo afirma un valor que no salió de una herramienta | Regla CA2 en el prompt; los payloads mostrados vienen de `oc_construir_payload`; se puede auditar en `out/log.jsonl`. |
-| Formatos nuevos de cotización o factura rompen la extracción por regex | Extracción con LLM y salida validada con zod, con la comparación en código; alertar cuando no se encuentra el total (ya se reporta como faltante). |
+| Formatos nuevos de cotización o factura rompen la extracción por regex | Extracción con LLM y salida validada con zod, con la comparación en código; alertar cuando no se encuentra el total (ya se reporta como faltante); diagnósticos de calidad de datos por lote (campos faltantes, montos atípicos). |
 | Conexión a SAP no viable | Plan B (§6.5): OC lista para pegar o carga masiva. |
 | Duplicados por reintentos o concurrencia | Clave de idempotencia en SAP + outbox + bloqueo transaccional (hoy el mock sobre archivos no tiene bloqueo). |
 | Abuso del link público y de la clave | Topes de iteraciones y tokens por sesión; en producción, SSO y cuota por usuario. |
