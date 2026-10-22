@@ -1,139 +1,141 @@
-// Herramientas del agente, tipadas con zod.
-// Una misma definición sirve para:
-//   1) Decirle a Claude qué herramientas existen (se convierte a JSON Schema).
-//   2) Validar lo que Claude envía antes de ejecutar nada.
-//   3) Llamarlas directamente desde demo.ts, sin LLM.
-import type Anthropic from "@anthropic-ai/sdk";
+// Herramientas del agente (contrato de la sección 6.2 del PRD).
+// Cada export es { description, args (esquemas zod), execute(args, ctx) } y el modelo la ve como oc_<export>.
+// execute devuelve SIEMPRE un string JSON { ok: true, data } o { ok: false, error }. Nunca lanza.
+import { mkdirSync, writeFileSync } from "node:fs";
 import { z } from "zod";
-import { evaluarSolicitud } from "../controles.js";
-import { cargarMaestros, cargarSolicitud, listarIdsSolicitudes } from "../datos.js";
-import { sap } from "../sap/simulado.js";
+import { validar as aplicarReglas } from "../controles.js";
+import { cargarMaestros, leerPaquete } from "../datos.js";
+import { calcularEvidencia, generarEvidencia } from "../evidencia.js";
+import { construirPayload } from "../payload.js";
+import { registrarControl, rutaOut } from "../registro.js";
+import { SapMock } from "../sap/mock.js";
 
-export interface Herramienta {
-  nombre: string;
-  descripcion: string;
-  esquema: z.ZodObject;
-  /** Si es true, el agente pausa y pide Aprobar/Rechazar antes de ejecutarla. */
-  requiereConfirmacion: boolean;
-  ejecutar: (input: unknown) => unknown;
+export interface Ctx {
+  directory: string; // raíz del proyecto; las rutas se resuelven desde aquí
+  sessionId: string;
 }
 
-export type ResultadoHerramienta = { ok: true; datos: unknown } | { ok: false; error: string };
+const respuesta = {
+  ok: (data: unknown) => JSON.stringify({ ok: true, data }),
+  error: (error: string) => JSON.stringify({ ok: false, error }),
+};
 
-/** Ayudante: valida la entrada con zod y luego llama a la función con el tipo correcto. */
-function definir<S extends z.ZodObject>(h: {
-  nombre: string;
-  descripcion: string;
-  esquema: S;
-  requiereConfirmacion?: boolean;
-  ejecutar: (input: z.infer<S>) => unknown;
-}): Herramienta {
-  return {
-    ...h,
-    requiereConfirmacion: h.requiereConfirmacion ?? false,
-    ejecutar: (input) => h.ejecutar(h.esquema.parse(input)),
-  };
-}
-
-const SolicitudIdInput = z.object({
-  solicitudId: z.string().regex(/^sol-\d{3}$/).describe('Id de la solicitud, por ejemplo "sol-001"'),
-});
-
-export const herramientas: Herramienta[] = [
-  definir({
-    nombre: "listar_solicitudes",
-    descripcion: "Lista las solicitudes de compra pendientes con un resumen de cada una y si ya tienen OC en SAP.",
-    esquema: z.object({}),
-    ejecutar: () =>
-      listarIdsSolicitudes().map((id) => {
-        const exp = cargarSolicitud(id);
-        return {
-          id,
-          asunto: exp.correo.asunto,
-          solicitante: exp.solicitud.solicitante,
-          nitProveedor: exp.solicitud.nitProveedor,
-          tieneFactura: exp.factura !== null,
-          ocSap: sap.buscarPorSolicitud(id)?.numero ?? null,
-        };
-      }),
-  }),
-
-  definir({
-    nombre: "leer_solicitud",
-    descripcion:
-      "Devuelve el expediente completo de una solicitud: correo, solicitud, texto de la cotización, aprobación y factura (si existe).",
-    esquema: SolicitudIdInput,
-    ejecutar: ({ solicitudId }) => cargarSolicitud(solicitudId),
-  }),
-
-  definir({
-    nombre: "validar_solicitud",
-    descripcion:
-      "Ejecuta TODOS los controles obligatorios sobre una solicitud y devuelve cada control (OK/FALLA/ALERTA con su explicación), " +
-      "si es apta para crear OC y los montos calculados. No modifica nada.",
-    esquema: SolicitudIdInput,
-    ejecutar: ({ solicitudId }) =>
-      evaluarSolicitud(cargarSolicitud(solicitudId), cargarMaestros(), !!sap.buscarPorSolicitud(solicitudId)),
-  }),
-
-  definir({
-    nombre: "crear_orden_compra",
-    descripcion:
-      "Crea la orden de compra en SAP para una solicitud. Vuelve a validar todos los controles y se niega si alguno falla. " +
-      "Requiere confirmación humana: el usuario verá botones Aprobar/Rechazar.",
-    esquema: SolicitudIdInput,
-    requiereConfirmacion: true,
-    ejecutar: ({ solicitudId }) => {
-      // Idempotencia: si ya existe, no se crea otra.
-      const existente = sap.buscarPorSolicitud(solicitudId);
-      if (existente) return { creada: false, yaExistia: true, oc: existente };
-
-      // La herramienta NO confía en el modelo: valida de nuevo antes de escribir en SAP.
-      const evaluacion = evaluarSolicitud(cargarSolicitud(solicitudId), cargarMaestros(), false);
-      if (!evaluacion.apta) {
-        return {
-          creada: false,
-          motivo: "La solicitud no pasa los controles obligatorios.",
-          controlesFallidos: evaluacion.controles.filter((c) => c.estado === "FALLA"),
-        };
-      }
-      const { oc } = sap.crearOrdenCompra(evaluacion.datosOC);
-      return { creada: true, oc };
-    },
-  }),
-
-  definir({
-    nombre: "listar_ordenes_compra",
-    descripcion: "Lista las órdenes de compra ya creadas en SAP.",
-    esquema: z.object({}),
-    ejecutar: () => sap.listar(),
-  }),
-];
-
-export function buscarHerramienta(nombre: string): Herramienta | undefined {
-  return herramientas.find((h) => h.nombre === nombre);
-}
-
-/** Ejecuta una herramienta por nombre. Nunca lanza: los errores se devuelven como { ok: false }. */
-export function ejecutarHerramienta(nombre: string, input: unknown): ResultadoHerramienta {
-  const h = buscarHerramienta(nombre);
-  if (!h) return { ok: false, error: `Herramienta desconocida: ${nombre}` };
+/** Ejecuta la lógica y convierte cualquier excepción en { ok: false, error } legible. */
+async function seguro(fn: () => Promise<unknown> | unknown): Promise<string> {
   try {
-    return { ok: true, datos: h.ejecutar(input) };
+    return respuesta.ok(await fn());
   } catch (e) {
-    const mensaje = e instanceof z.ZodError ? `Entrada inválida: ${z.prettifyError(e)}` : String(e instanceof Error ? e.message : e);
-    return { ok: false, error: mensaje };
+    return respuesta.error(e instanceof Error ? e.message : String(e));
   }
 }
 
-/** Convierte las herramientas zod al formato que espera la API de Claude. */
-export function definicionesParaClaude(): Anthropic.Tool[] {
-  return herramientas.map((h) => {
-    const { $schema: _omitido, ...schema } = z.toJSONSchema(h.esquema) as Record<string, unknown>;
-    return {
-      name: h.nombre,
-      description: h.descripcion,
-      input_schema: schema as Anthropic.Tool.InputSchema,
-    };
-  });
+const caso = z.string().describe('Carpeta del caso en fixtures/reto-03/solicitudes/, por ejemplo "sol-001"');
+const ignorado = (que: string) =>
+  z.unknown().optional().describe(`Opcional. Se ignora: ${que} se recalcula desde las fuentes para que no pueda alterarse.`);
+
+/** Paquete + maestros + validación: el punto de partida de casi todas las herramientas. */
+function evaluar(raiz: string, c: string) {
+  const paquete = leerPaquete(raiz, c);
+  const maestros = cargarMaestros(raiz);
+  return { paquete, maestros, validacion: aplicarReglas(paquete, maestros) };
 }
+
+export const leer_paquete = {
+  description: "Lee el correo, la solicitud, la cotización, la aprobación y la factura (si existe) de un caso y los devuelve normalizados.",
+  args: { caso },
+  execute: (args: { caso: string }, ctx: Ctx) => seguro(() => leerPaquete(ctx.directory, args.caso)),
+};
+
+export const validar = {
+  description: "Aplica las reglas de control RC1–RC10 a un caso y devuelve apta, bloqueos, confirmaciones, derivados y si es retroactiva.",
+  args: { caso, paquete: ignorado("el paquete") },
+  execute: (args: { caso: string }, ctx: Ctx) =>
+    seguro(() => {
+      const { validacion } = evaluar(ctx.directory, args.caso);
+      return validacion;
+    }),
+};
+
+export const construir_payload = {
+  description: "Construye la OC tal como quedaría en SAP (sin crearla) y guarda la trazabilidad de cada campo en out/<caso>/trazabilidad.json.",
+  args: { caso, paquete: ignorado("el paquete"), derivados: ignorado("los derivados") },
+  execute: (args: { caso: string }, ctx: Ctx) =>
+    seguro(() => {
+      const { paquete, maestros, validacion } = evaluar(ctx.directory, args.caso);
+      const { sha256 } = calcularEvidencia(ctx.directory, args.caso);
+      const { orden, trazabilidad } = construirPayload(paquete, validacion, maestros, sha256, null);
+      mkdirSync(rutaOut(ctx.directory, args.caso), { recursive: true });
+      writeFileSync(rutaOut(ctx.directory, args.caso, "trazabilidad.json"), JSON.stringify(trazabilidad, null, 2));
+      return { orden, trazabilidad: `out/${args.caso}/trazabilidad.json`, confirmaciones_pendientes: validacion.confirmaciones };
+    }),
+};
+
+export const generar_evidencia = {
+  description: "Genera la evidencia del correo de aprobación en out/<caso>/aprobacion.txt y devuelve su ruta y sha256.",
+  args: { caso },
+  execute: (args: { caso: string }, ctx: Ctx) => seguro(() => generarEvidencia(ctx.directory, args.caso)),
+};
+
+/** JSON con llaves ordenadas: permite comparar objetos sin importar el orden de los campos. */
+function canonico(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonico).join(",")}]`;
+  if (v && typeof v === "object")
+    return `{${Object.entries(v).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => `${JSON.stringify(k)}:${canonico(x)}`).join(",")}}`;
+  return JSON.stringify(v);
+}
+
+export const crear = {
+  description:
+    "Crea la OC en SAP. Solo procede si el caso está apto y, cuando hay confirmaciones, con confirmado=true tras la confirmación explícita del usuario. Es idempotente.",
+  args: {
+    caso,
+    payload: z.unknown().optional().describe("Opcional. Si se envía, debe coincidir con el construido desde las fuentes; si no, se rechaza."),
+    confirmado: z.boolean().optional().describe("true solo si el usuario confirmó explícitamente en su último mensaje."),
+  },
+  execute: (args: { caso: string; payload?: unknown; confirmado?: boolean }, ctx: Ctx) =>
+    seguro(async () => {
+      const raiz = ctx.directory;
+      const { paquete, maestros, validacion } = evaluar(raiz, args.caso);
+      const sap = new SapMock(raiz);
+      const id = paquete.solicitud.solicitud_id;
+      const fila = {
+        solicitud_id: id,
+        retroactiva: validacion.retroactiva,
+        bloqueos: validacion.bloqueos.map((b) => b.regla),
+        confirmaciones: validacion.confirmaciones.map((c) => c.regla),
+      };
+
+      // 1. Idempotencia: si ya existe una OC para esta solicitud, se devuelve la misma.
+      const existente = await sap.buscarOrdenPorReferencia(id);
+      if (existente) {
+        registrarControl(raiz, { ...fila, resultado: "idempotente", numero_oc: existente.numero_oc });
+        const previa = sap.listar().find((o) => o.numero_oc === existente.numero_oc);
+        return { numero_oc: existente.numero_oc, fecha: previa?.fecha ?? "", idempotente: true };
+      }
+      // 2. Bloqueos: no se crea nunca.
+      if (!validacion.apta) {
+        registrarControl(raiz, { ...fila, resultado: "bloqueada", numero_oc: "" });
+        throw new Error(`OC bloqueada: ${validacion.bloqueos.map((b) => `${b.regla} ${b.detalle} Acción: ${b.accion}`).join(" | ")}`);
+      }
+      // 3. Confirmaciones: solo con confirmado = true.
+      if (validacion.confirmaciones.length > 0 && args.confirmado !== true) {
+        registrarControl(raiz, { ...fila, resultado: "pendiente", numero_oc: "" });
+        throw new Error(
+          `Requiere confirmación humana antes de crear: ${validacion.confirmaciones.map((c) => `${c.regla} ${c.detalle}`).join(" | ")}`,
+        );
+      }
+      // 4. El payload se reconstruye desde las fuentes; el del modelo solo se acepta si es idéntico.
+      const evidencia = generarEvidencia(raiz, args.caso);
+      const confirmadoPor = validacion.confirmaciones.length > 0 ? `usuario (sesión ${ctx.sessionId})` : null;
+      const { orden } = construirPayload(paquete, validacion, maestros, evidencia.sha256, confirmadoPor);
+      const sinExcepciones = (o: unknown) => (o && typeof o === "object" ? { ...o, excepciones: undefined } : o);
+      if (args.payload !== undefined && canonico(sinExcepciones(args.payload)) !== canonico(sinExcepciones(orden))) {
+        registrarControl(raiz, { ...fila, resultado: "rechazada", numero_oc: "" });
+        throw new Error("El payload recibido no coincide con el construido desde las fuentes. Llama oc_crear sin payload.");
+      }
+      // 5. Crear en SAP y registrar en el log de control.
+      const { numero_oc, fecha } = await sap.crearOrden(orden);
+      registrarControl(raiz, { ...fila, resultado: "creada", numero_oc });
+      return { numero_oc, fecha, idempotente: false, retroactiva: validacion.retroactiva, evidencia: evidencia.ruta };
+    }),
+};

@@ -7,3 +7,7 @@ dist/
 # Material privado de preparación (no se publica)
 docs/instrucciones/
 CLAUDE.md
+
+# Generado en ejecución y material de la prueba
+out/
+*.zip

@@ -1,5 +1,22 @@
 [
-  { "codigo": "P00", "dias": 0, "descripcion": "Pago de contado" },
-  { "codigo": "P30", "dias": 30, "descripcion": "Pago a 30 días" },
-  { "codigo": "P60", "dias": 60, "descripcion": "Pago a 60 días" }
+  {
+    "codigo": "Z000",
+    "descripcion": "Pago inmediato",
+    "dias": 0
+  },
+  {
+    "codigo": "Z015",
+    "descripcion": "15 días fecha factura",
+    "dias": 15
+  },
+  {
+    "codigo": "Z030",
+    "descripcion": "30 días fecha factura",
+    "dias": 30
+  },
+  {
+    "codigo": "Z060",
+    "descripcion": "60 días fecha factura",
+    "dias": 60
+  }
 ]

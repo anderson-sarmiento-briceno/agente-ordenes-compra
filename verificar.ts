@@ -2,21 +2,27 @@
 // Muestra TODOS los problemas de una vez (no se detiene en el primero).
 // Uso: npm run verificar   (útil justo después de copiar los fixtures reales)
 import { existsSync, readdirSync } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
-  AprobacionSchema,
+  AprobacionArchivoSchema,
   CentroCostoSchema,
   CondicionPagoSchema,
   CorreoSchema,
-  DIR_MAESTROS,
-  DIR_SOLICITUDES,
   IndicadorIvaSchema,
   leerTexto,
   ProveedorSchema,
-  RAIZ,
+  rutaFixtures,
+  rutaMaestros,
+  rutaSolicitudes,
   SolicitudSchema,
 } from "./src/datos.js";
+
+const PROYECTO = dirname(fileURLToPath(import.meta.url));
+const RAIZ = rutaFixtures(PROYECTO);
+const DIR_MAESTROS = rutaMaestros(PROYECTO);
+const DIR_SOLICITUDES = rutaSolicitudes(PROYECTO);
 
 let errores = 0;
 let avisos = 0;
@@ -76,7 +82,7 @@ for (const id of carpetas) {
 
   revisarJson(join(dir, "correo.json"), CorreoSchema);
   revisarJson(join(dir, "solicitud.json"), SolicitudSchema);
-  revisarJson(join(dir, "aprobacion.json"), AprobacionSchema);
+  revisarJson(join(dir, "aprobacion.json"), AprobacionArchivoSchema);
   if (existsSync(join(dir, "cotizacion.txt"))) ok("cotizacion.txt");
   else error("cotizacion.txt: NO EXISTE");
   if (existsSync(join(dir, "factura.txt"))) ok("factura.txt (compra retroactiva)");
@@ -84,12 +90,6 @@ for (const id of carpetas) {
   for (const archivo of readdirSync(dir))
     if (!ESPERADOS.includes(archivo)) aviso(`Archivo no esperado: ${archivo}`);
 
-  try {
-    const sol = JSON.parse(leerTexto(join(dir, "solicitud.json")));
-    if (sol?.id !== undefined && sol.id !== id) aviso(`solicitud.json tiene id "${sol.id}" pero la carpeta se llama "${id}"`);
-  } catch {
-    // ya se reportó arriba
-  }
 }
 
 console.log(`\n=== Resumen: ${carpetas.length} solicitudes · ${errores} errores · ${avisos} avisos ===`);

@@ -1,158 +1,170 @@
-// Controles de validación de una solicitud de compra.
-// Funciones PURAS: mismos datos de entrada -> mismo resultado, siempre.
-// No llaman al LLM ni a SAP. Por eso demo.ts puede correrlos sin Claude.
-// >>> El día de la prueba, AJUSTAR la lista de controles a las reglas del PRD. <<<
-import type { ExpedienteSolicitud, Maestros } from "./datos.js";
-import type { DatosOC } from "./sap/simulado.js";
+// Reglas de control RC1–RC10 (sección 7.3 del PRD).
+// Funciones PURAS: mismo paquete + mismos maestros -> mismo resultado. No usan el LLM.
+import { normalizarNit, normalizarNombre, type Maestros, type Paquete, type Proveedor } from "./datos.js";
 
-export type Estado = "OK" | "FALLA" | "ALERTA";
+export type Regla = "RC1" | "RC2" | "RC3" | "RC4" | "RC5" | "RC6" | "RC7" | "RC8" | "RC9" | "RC10";
+export type Estado = "ok" | "bloqueo" | "confirmacion" | "derivado";
 
-export interface ResultadoControl {
-  codigo: string; // C01, C02, ... (sirve para la matriz de controles)
-  control: string; // nombre legible
-  estado: Estado;
-  detalle: string; // explicación: por qué pasó o falló
+export interface Hallazgo {
+  regla: Regla;
+  detalle: string;
+  accion?: string; // acción sugerida al humano
 }
 
-export interface Evaluacion {
-  solicitudId: string;
-  controles: ResultadoControl[];
-  /** true si ningún control quedó en FALLA (las ALERTA no bloquean, pero se avisan). */
-  apta: boolean;
+export interface Derivado {
+  valor: string;
+  fuente: string; // de dónde salió, p. ej. "maestro.proveedores"
+  detalle: string;
+}
+
+export interface Validacion {
+  apta: boolean; // sin bloqueos
+  bloqueos: Hallazgo[];
+  confirmaciones: Hallazgo[];
+  derivados: Record<string, Derivado>;
   retroactiva: boolean;
-  /** Datos listos para enviar a SAP (solo se usan si apta = true). */
-  datosOC: DatosOC;
+  controles: { regla: Regla; estado: Estado; detalle: string }[]; // una fila por regla (matriz)
 }
 
-/** Convierte "$ 4.000.000" o "4.000.000,50" (formato colombiano) a número. */
-export function parsearMonto(texto: string): number {
-  const limpio = texto.replace(/[^\d.,]/g, "").replace(/\./g, "").replace(",", ".");
-  return Number(limpio);
-}
-
-/** Busca "ETIQUETA: $ 1.234.567" en un texto libre (cotización o factura). */
-function extraerMonto(texto: string, etiqueta: RegExp): number | null {
-  const m = texto.match(new RegExp(etiqueta.source + String.raw`[^\d\n]*([\d.,]+)`, "i"));
-  return m ? parsearMonto(m[1]) : null;
-}
-
-function extraerFecha(texto: string): string | null {
-  const m = texto.match(/FECHA[^\d\n]*(\d{4}-\d{2}-\d{2})/i);
-  return m ? m[1] : null;
-}
-
-const redondear = (n: number) => Math.round(n);
+const TOLERANCIA_COTIZACION = 0.02; // RC5: 2 %
 const pesos = (n: number) => "$" + n.toLocaleString("es-CO");
+const soloFecha = (iso: string) => iso.slice(0, 10);
 
-export function evaluarSolicitud(
-  exp: ExpedienteSolicitud,
-  maestros: Maestros,
-  ocExistente: boolean,
-): Evaluacion {
-  const s = exp.solicitud;
-  const controles: ResultadoControl[] = [];
-  const agregar = (codigo: string, control: string, estado: Estado, detalle: string) =>
-    controles.push({ codigo, control, estado, detalle });
+export function buscarProveedor(paquete: Paquete, maestros: Maestros): { proveedor: Proveedor | undefined; por: "nit" | "nombre" } {
+  const { proveedor_nit, proveedor_nombre } = paquete.solicitud;
+  if (proveedor_nit) {
+    const nit = normalizarNit(proveedor_nit);
+    return { proveedor: maestros.proveedores.find((p) => normalizarNit(p.nit) === nit), por: "nit" };
+  }
+  const nombre = normalizarNombre(proveedor_nombre);
+  return { proveedor: maestros.proveedores.find((p) => normalizarNombre(p.nombre) === nombre), por: "nombre" };
+}
 
-  // ---- Datos de los maestros que vamos a necesitar ----
-  const proveedor = maestros.proveedores.find((p) => p.nit === s.nitProveedor);
-  const centro = maestros.centrosCosto.find((c) => c.codigo === s.centroCosto);
-  const codigoIva = s.indicadorIva ?? proveedor?.indicadorIvaDefault ?? "";
-  const iva = maestros.indicadoresIva.find((i) => i.codigo === codigoIva);
-  const codigoPago = s.condicionPago ?? proveedor?.condicionPagoDefault ?? "";
-  const pago = maestros.condicionesPago.find((c) => c.codigo === codigoPago);
+export function validar(paquete: Paquete, maestros: Maestros): Validacion {
+  const s = paquete.solicitud;
+  const bloqueos: Hallazgo[] = [];
+  const confirmaciones: Hallazgo[] = [];
+  const derivados: Record<string, Derivado> = {};
+  const controles: Validacion["controles"] = [];
 
-  // ---- Cálculo de la OC (determinista) ----
-  const posiciones = s.items.map((it) => ({
-    ...it,
-    valor: redondear(it.cantidad * it.precioUnitario),
-  }));
-  const subtotal = posiciones.reduce((acc, p) => acc + p.valor, 0);
-  const valorIva = redondear(subtotal * (iva?.tasa ?? 0));
-  const total = subtotal + valorIva;
-
-  // C01 - Proveedor existe y está activo
-  if (!proveedor) agregar("C01", "Proveedor activo", "FALLA", `El NIT ${s.nitProveedor} no existe en el maestro de proveedores.`);
-  else if (proveedor.estado !== "ACTIVO")
-    agregar("C01", "Proveedor activo", "FALLA", `${proveedor.nombre} está en estado ${proveedor.estado}.`);
-  else agregar("C01", "Proveedor activo", "OK", `${proveedor.nombre} (NIT ${proveedor.nit}) está ACTIVO.`);
-
-  // C02 - Centro de costo y subárea válidos
-  if (!centro) agregar("C02", "Centro de costo y subárea", "FALLA", `El centro ${s.centroCosto} no existe.`);
-  else if (!centro.subareas.includes(s.subarea))
-    agregar("C02", "Centro de costo y subárea", "FALLA", `La subárea ${s.subarea} no pertenece a ${centro.codigo}.`);
-  else agregar("C02", "Centro de costo y subárea", "OK", `${centro.codigo} ${centro.nombre} / ${s.subarea}.`);
-
-  // C03 - Evidencia de aprobación del líder correcto
-  const ap = exp.aprobacion;
-  if (!ap.aprobado) agregar("C03", "Aprobación del líder", "FALLA", "La evidencia indica que la solicitud NO fue aprobada.");
-  else if (!centro) agregar("C03", "Aprobación del líder", "FALLA", "No se puede verificar el líder: centro de costo inválido.");
-  else if (ap.aprobador.toLowerCase() !== centro.lider.email.toLowerCase())
-    agregar("C03", "Aprobación del líder", "FALLA", `Aprobó ${ap.aprobador}, pero el líder de ${centro.codigo} es ${centro.lider.email}.`);
-  else agregar("C03", "Aprobación del líder", "OK", `Aprobada por ${centro.lider.nombre} el ${ap.fecha}.`);
-
-  // C04 - Monto dentro del tope de aprobación del líder (se compara el total con IVA; confirmar con el PRD)
-  if (!centro) agregar("C04", "Tope de aprobación", "FALLA", "No se puede verificar el tope: centro de costo inválido.");
-  else if (total > centro.lider.topeAprobacion)
-    agregar("C04", "Tope de aprobación", "FALLA", `Total ${pesos(total)} supera el tope de ${centro.lider.nombre} (${pesos(centro.lider.topeAprobacion)}).`);
-  else agregar("C04", "Tope de aprobación", "OK", `Total ${pesos(total)} <= tope ${pesos(centro.lider.topeAprobacion)}.`);
-
-  // C05 - Indicador de IVA válido
-  if (!iva) agregar("C05", "Indicador de IVA", "FALLA", `El indicador "${codigoIva}" no existe.`);
-  else agregar("C05", "Indicador de IVA", "OK", `${iva.codigo} (${iva.descripcion}): IVA ${pesos(valorIva)}.`);
-
-  // C06 - Condición de pago válida (la de la solicitud o la default del proveedor)
-  const origenPago = s.condicionPago ? "de la solicitud" : "default del proveedor";
-  if (!pago) agregar("C06", "Condición de pago", "FALLA", `La condición "${codigoPago}" no existe.`);
-  else agregar("C06", "Condición de pago", "OK", `${pago.codigo} - ${pago.descripcion} (${origenPago}).`);
-
-  // C07 - Coherencia entre solicitud y cotización (NIT y subtotal)
-  const subtotalCotizado = extraerMonto(exp.cotizacion, /SUBTOTAL/);
-  if (!exp.cotizacion.includes(s.nitProveedor))
-    agregar("C07", "Coherencia con cotización", "FALLA", `La cotización no menciona el NIT ${s.nitProveedor}.`);
-  else if (subtotalCotizado === null)
-    agregar("C07", "Coherencia con cotización", "FALLA", "No se encontró el SUBTOTAL en la cotización.");
-  else if (Math.abs(subtotalCotizado - subtotal) > 1)
-    agregar("C07", "Coherencia con cotización", "FALLA", `Subtotal solicitud ${pesos(subtotal)} ≠ cotización ${pesos(subtotalCotizado)}.`);
-  else agregar("C07", "Coherencia con cotización", "OK", `Subtotal ${pesos(subtotal)} coincide con la cotización.`);
-
-  // C08 - Compra retroactiva: la factura llegó antes que la OC/aprobación
-  let retroactiva = false;
-  if (exp.factura) {
-    retroactiva = true;
-    const fechaFactura = extraerFecha(exp.factura);
-    const antesDeAprobar = fechaFactura !== null && fechaFactura < ap.fecha;
-    agregar(
-      "C08",
-      "Compra retroactiva",
-      "ALERTA",
-      `Existe factura${fechaFactura ? ` del ${fechaFactura}` : ""}` +
-        (antesDeAprobar ? `, ANTERIOR a la aprobación (${ap.fecha})` : "") +
-        ". La compra se hizo antes de la OC: requiere revisión y se marcará como retroactiva.",
-    );
-  } else agregar("C08", "Compra retroactiva", "OK", "No hay factura previa: compra con OC antes de facturar.");
-
-  // C09 - No duplicar OC
-  if (ocExistente) agregar("C09", "OC no duplicada", "FALLA", `Ya existe una OC en SAP para ${s.id}.`);
-  else agregar("C09", "OC no duplicada", "OK", "No hay OC previa para esta solicitud.");
-
-  return {
-    solicitudId: s.id,
-    controles,
-    apta: controles.every((c) => c.estado !== "FALLA"),
-    retroactiva,
-    datosOC: {
-      solicitudId: s.id,
-      nitProveedor: s.nitProveedor,
-      centroCosto: s.centroCosto,
-      subarea: s.subarea,
-      indicadorIva: codigoIva,
-      condicionPago: codigoPago,
-      posiciones,
-      subtotal,
-      iva: valorIva,
-      total,
-      retroactiva,
-    },
+  const ok = (regla: Regla, detalle: string) => controles.push({ regla, estado: "ok", detalle });
+  const bloquear = (regla: Regla, detalle: string, accion: string) => {
+    bloqueos.push({ regla, detalle, accion });
+    controles.push({ regla, estado: "bloqueo", detalle });
   };
+  const confirmar = (regla: Regla, detalle: string) => {
+    confirmaciones.push({ regla, detalle });
+    controles.push({ regla, estado: "confirmacion", detalle });
+  };
+  const derivar = (regla: Regla, campo: string, d: Derivado) => {
+    derivados[campo] = d;
+    controles.push({ regla, estado: "derivado", detalle: d.detalle });
+  };
+
+  // RC1 · Proveedor existe (por NIT; si no hay NIT, por nombre normalizado) y está activo
+  const { proveedor, por } = buscarProveedor(paquete, maestros);
+  const idProveedor = por === "nit" ? `NIT ${s.proveedor_nit}` : `"${s.proveedor_nombre}" (sin NIT, buscado por nombre)`;
+  if (!proveedor)
+    bloquear("RC1", `El proveedor ${idProveedor} no existe en el maestro de proveedores.`,
+      "Solicitar a compras la creación del proveedor en SAP o corregir el NIT en la solicitud.");
+  else if (!proveedor.activo)
+    bloquear("RC1", `El proveedor ${proveedor.nombre} está INACTIVO.`, "Pedir la reactivación del proveedor o elegir otro proveedor.");
+  else ok("RC1", `${proveedor.nombre} (código SAP ${proveedor.codigo_sap}) existe y está activo; encontrado por ${por}.`);
+  if (proveedor && por === "nombre")
+    derivados.proveedor_nit = { valor: proveedor.nit, fuente: "maestro.proveedores", detalle: `NIT ${proveedor.nit} tomado del maestro (la solicitud no lo trae).` };
+
+  // RC4 · La subárea pertenece al centro de costo (se evalúa antes porque RC2 y RC3 dependen del centro)
+  const centro = maestros.centrosCosto.find((c) => c.centro_costo === s.centro_costo);
+
+  // RC2 · Aprobación existe, dice "Aprobado" y viene de un aprobador del centro de costo
+  const ap = paquete.aprobacion;
+  const aprobador = centro?.aprobadores.find((a) => a.email.toLowerCase() === ap?.de.toLowerCase());
+  const listaAprobadores = centro?.aprobadores.map((a) => `${a.nombre} <${a.email}> (tope ${pesos(a.tope)})`).join(", ") ?? "";
+  if (!ap) bloquear("RC2", "No hay correo de aprobación en el paquete.", "Pedir al solicitante el correo de aprobación del líder.");
+  else if (!ap.aprobado) bloquear("RC2", "El correo de aprobación no contiene \"Aprobado\".", "Pedir al líder una aprobación explícita.");
+  else if (!centro) bloquear("RC2", `No se puede verificar el aprobador: el centro ${s.centro_costo} no existe.`, "Corregir el centro de costo.");
+  else if (!aprobador)
+    bloquear("RC2", `${ap.de} no es aprobador del centro ${centro.centro_costo} (${centro.nombre}).`,
+      `Solicitar la aprobación a un aprobador de ${centro.centro_costo}: ${listaAprobadores}.`);
+  else ok("RC2", `Aprobado por ${aprobador.nombre}, aprobador de ${centro.centro_costo}.`);
+
+  // RC3 · valor_total <= tope del aprobador para ese centro
+  if (aprobador) {
+    if (s.valor_total > aprobador.tope)
+      bloquear("RC3", `${pesos(s.valor_total)} supera el tope de ${aprobador.nombre} (${pesos(aprobador.tope)}).`,
+        `Pedir aprobación a alguien con tope suficiente en ${s.centro_costo}.`);
+    else ok("RC3", `${pesos(s.valor_total)} está dentro del tope de ${aprobador.nombre} (${pesos(aprobador.tope)}).`);
+  } else if (centro) {
+    const maxTope = Math.max(0, ...centro.aprobadores.map((a) => a.tope));
+    if (s.valor_total > maxTope)
+      bloquear("RC3", `${pesos(s.valor_total)} supera el tope de TODOS los aprobadores de ${centro.centro_costo} (máximo ${pesos(maxTope)}).`,
+        "Escalar a un nivel de aprobación superior o revisar si el centro de costo es el correcto.");
+    else ok("RC3", `No evaluable contra el aprobador (RC2), pero existe en ${centro.centro_costo} un aprobador con tope suficiente.`);
+  } else bloquear("RC3", "No se puede verificar el tope: centro de costo inexistente.", "Corregir el centro de costo.");
+
+  // RC4 · subárea pertenece al centro
+  if (!centro) bloquear("RC4", `El centro de costo ${s.centro_costo} no existe.`, "Corregir el centro de costo en la solicitud.");
+  else if (!centro.subareas.includes(s.subarea))
+    bloquear("RC4", `La subárea "${s.subarea}" no pertenece a ${centro.centro_costo} (${centro.subareas.join(", ")}).`, "Corregir la subárea.");
+  else ok("RC4", `${s.subarea} pertenece a ${centro.centro_costo} ${centro.nombre}.`);
+
+  // RC5 · |cotización.total − solicitud.valor_total| / valor_total <= 2 %
+  const cot = paquete.cotizacion;
+  if (!cot) confirmar("RC5", "No hay cotización legible en el paquete. ¿Confirmas crear la OC sin cotización?");
+  else {
+    const desvio = s.valor_total === 0 ? 1 : Math.abs(cot.total - s.valor_total) / s.valor_total;
+    if (desvio > TOLERANCIA_COTIZACION)
+      confirmar("RC5", `La cotización (${pesos(cot.total)}) difiere ${(desvio * 100).toFixed(1)} % de la solicitud (${pesos(s.valor_total)}); el máximo es 2 %.`);
+    else ok("RC5", `Cotización ${pesos(cot.total)} vs solicitud ${pesos(s.valor_total)}: diferencia ${(desvio * 100).toFixed(1)} %.`);
+  }
+
+  // RC6 · indicador_iva ausente -> se deriva del proveedor y se pide confirmación
+  if (s.indicador_iva) {
+    const iva = maestros.indicadoresIva.find((i) => i.codigo === s.indicador_iva);
+    if (!iva) bloquear("RC6", `El indicador de IVA "${s.indicador_iva}" no existe en el maestro.`, "Corregir el indicador de IVA.");
+    else ok("RC6", `Indicador ${iva.codigo} (${iva.descripcion}) informado en la solicitud.`);
+  } else if (proveedor) {
+    derivar("RC6", "indicador_iva", {
+      valor: proveedor.indicador_iva_default,
+      fuente: "maestro.proveedores",
+      detalle: `IVA no informado: se usa el default del proveedor (${proveedor.indicador_iva_default}).`,
+    });
+    confirmaciones.push({ regla: "RC6", detalle: `La solicitud no trae indicador de IVA; se derivó ${proveedor.indicador_iva_default} del proveedor. ¿Lo confirmas?` });
+  } else confirmar("RC6", "La solicitud no trae indicador de IVA y no se puede derivar (proveedor no encontrado).");
+
+  // RC7 · condiciones_pago ausente -> se deriva del proveedor (solo se informa)
+  if (s.condiciones_pago) {
+    const cp = maestros.condicionesPago.find((c) => c.codigo === s.condiciones_pago);
+    if (!cp) bloquear("RC7", `La condición de pago "${s.condiciones_pago}" no existe en el maestro.`, "Corregir la condición de pago.");
+    else ok("RC7", `Condición ${cp.codigo} (${cp.descripcion}) informada en la solicitud.`);
+  } else if (proveedor)
+    derivar("RC7", "condiciones_pago", {
+      valor: proveedor.condiciones_pago_default,
+      fuente: "maestro.proveedores",
+      detalle: `Condición de pago no informada: se usa la del proveedor (${proveedor.condiciones_pago_default}).`,
+    });
+  else ok("RC7", "No evaluable: proveedor no encontrado (ver RC1).");
+
+  // RC8 · factura con fecha anterior a fecha_solicitud -> retroactiva + confirmación
+  const fac = paquete.factura;
+  const retroactiva = !!fac && fac.fecha < s.fecha_solicitud;
+  if (retroactiva)
+    confirmar("RC8", `Compra RETROACTIVA: la factura ${fac.numero} es del ${fac.fecha}, anterior a la solicitud (${s.fecha_solicitud}). Se registrará retroactiva = true.`);
+  else ok("RC8", fac ? `Hay factura ${fac.numero} del ${fac.fecha}, no anterior a la solicitud.` : "No hay factura previa.");
+
+  // RC9 · fecha de aprobación >= fecha_solicitud
+  if (ap && soloFecha(ap.fecha) < s.fecha_solicitud)
+    confirmar("RC9", `La aprobación (${soloFecha(ap.fecha)}) es anterior a la solicitud (${s.fecha_solicitud}).`);
+  else ok("RC9", ap ? `Aprobación del ${soloFecha(ap.fecha)} posterior o igual a la solicitud (${s.fecha_solicitud}).` : "Sin aprobación (ver RC2).");
+
+  // RC10 · cantidad × valor_unitario = valor_total (± 1)
+  const calculado = s.cantidad * s.valor_unitario;
+  if (Math.abs(calculado - s.valor_total) > 1)
+    bloquear("RC10", `${s.cantidad} × ${pesos(s.valor_unitario)} = ${pesos(calculado)}, pero valor_total es ${pesos(s.valor_total)}.`,
+      "Pedir al solicitante corregir cantidades o valores en la solicitud.");
+  else ok("RC10", `${s.cantidad} × ${pesos(s.valor_unitario)} = ${pesos(s.valor_total)}.`);
+
+  const orden: Regla[] = ["RC1", "RC2", "RC3", "RC4", "RC5", "RC6", "RC7", "RC8", "RC9", "RC10"];
+  controles.sort((a, b) => orden.indexOf(a.regla) - orden.indexOf(b.regla));
+  return { apta: bloqueos.length === 0, bloqueos, confirmaciones, derivados, retroactiva, controles };
 }

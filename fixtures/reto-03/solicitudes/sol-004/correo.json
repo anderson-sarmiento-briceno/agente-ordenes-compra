@@ -1,5 +1,14 @@
 {
-  "de": "maria.lopez@empresa.com",
-  "asunto": "Solicitud de compra - switches de red",
-  "fecha": "2026-10-07T11:20:00-05:00"
+  "id": "sol-004-correo",
+  "de": "natalia.ríos@periferia-ficticia.com",
+  "para": "compras@periferia-ficticia.com",
+  "asunto": "Solicitud de orden de compra SOL-004 - Bolsa de 100 horas de arquitectura de nu",
+  "fecha": "2026-08-26T09:00:00-05:00",
+  "cuerpo": "Hola Camila,\n\nAdjunto la solicitud de compra, la cotización del proveedor y el correo de aprobación de mi líder. Quedo atento a la orden de compra.\n\nGracias,\nNatalia Ríos",
+  "adjuntos": [
+    "solicitud.xlsx",
+    "cotizacion.pdf",
+    "aprobacion.eml"
+  ],
+  "nota_fixture": "Los adjuntos binarios se entregan normalizados: solicitud.xlsx → solicitud.json, cotizacion.pdf → cotizacion.txt, aprobacion.eml → aprobacion.json, factura.pdf → factura.txt"
 }
