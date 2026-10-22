@@ -7,9 +7,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-const RAIZ = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "reto-03");
-const DIR_MAESTROS = join(RAIZ, "maestros");
-const DIR_SOLICITUDES = join(RAIZ, "solicitudes");
+export const RAIZ = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "reto-03");
+export const DIR_MAESTROS = join(RAIZ, "maestros");
+export const DIR_SOLICITUDES = join(RAIZ, "solicitudes");
 
 // ---------- Esquemas de los maestros ----------
 
@@ -102,8 +102,13 @@ export interface ExpedienteSolicitud {
 
 // ---------- Funciones de lectura ----------
 
+/** Lee un archivo de texto quitando el BOM (marca invisible que agregan algunos editores de Windows). */
+export function leerTexto(ruta: string): string {
+  return readFileSync(ruta, "utf8").replace(/^﻿/, "");
+}
+
 function leerJson<T>(ruta: string, esquema: z.ZodType<T>): T {
-  return esquema.parse(JSON.parse(readFileSync(ruta, "utf8")));
+  return esquema.parse(JSON.parse(leerTexto(ruta)));
 }
 
 export function cargarMaestros(): Maestros {
@@ -133,8 +138,8 @@ export function cargarSolicitud(id: string): ExpedienteSolicitud {
     id,
     correo: leerJson(join(dir, "correo.json"), CorreoSchema),
     solicitud: leerJson(join(dir, "solicitud.json"), SolicitudSchema),
-    cotizacion: readFileSync(join(dir, "cotizacion.txt"), "utf8"),
+    cotizacion: leerTexto(join(dir, "cotizacion.txt")),
     aprobacion: leerJson(join(dir, "aprobacion.json"), AprobacionSchema),
-    factura: existsSync(rutaFactura) ? readFileSync(rutaFactura, "utf8") : null,
+    factura: existsSync(rutaFactura) ? leerTexto(rutaFactura) : null,
   };
 }

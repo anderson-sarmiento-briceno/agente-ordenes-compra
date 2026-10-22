@@ -11,6 +11,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "demo": "tsx demo.ts",
+    "verificar": "tsx verificar.ts",
     "typecheck": "tsc --noEmit"
   },
   "author": "Anderson Sarmiento Briceño",
