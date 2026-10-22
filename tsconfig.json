@@ -10,5 +10,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "demo.ts", "verificar.ts"]
+  "include": ["src", "demo.ts", "verificar.ts", "scripts", "modulo"]
 }
