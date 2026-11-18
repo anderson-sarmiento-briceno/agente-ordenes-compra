@@ -34,7 +34,7 @@ escribir(
   "modulo/skill/ordenes-compra/SKILL.md",
   `---
 name: ordenes-compra
-description: Conocimiento del proceso de órdenes de compra de Periferia (paquete de la solicitud, reglas de control RC1–RC10, glosario SAP). Úsalo al procesar solicitudes de compra.
+description: Conocimiento del proceso de órdenes de compra (paquete de la solicitud, reglas de control RC1–RC10, glosario SAP). Úsalo al procesar solicitudes de compra.
 ---
 ${AVISO}
 

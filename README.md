@@ -1,9 +1,8 @@
-# Agente de órdenes de compra SAP (Reto técnico 03)
+# Agente de órdenes de compra SAP
 
 Agente conversacional que lee el paquete de una solicitud de compra, lo valida contra los maestros (reglas RC1–RC10), construye el payload de la OC, genera la evidencia de aprobación y crea la OC en un SAP simulado, pidiendo confirmación humana en las excepciones.
 
 - **Link para probar:** https://agente-ordenes-compra-nviw.onrender.com (plan gratuito: la primera carga puede tardar ~50 s). Sin clave de acceso.
-- **Documentación de la solución:** [SOLUCION.md](SOLUCION.md)
 
 ## Levantar en local (un comando)
 
@@ -66,7 +65,7 @@ src/payload.ts                esquema zod de la OC y trazabilidad
 src/evidencia.ts              evidencia de aprobación con sha256
 src/server.ts                 API HTTP
 public/index.html             front de chat
-fixtures/reto-03/             entregados por Periferia (no se modifican)
+fixtures/reto-03/             maestros y solicitudes de ejemplo
 out/                          generado en ejecución (no versionado)
 demo.ts                       verificación sin modelo
 ```
